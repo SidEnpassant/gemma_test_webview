@@ -89,6 +89,11 @@
     color: #8a5200; font-size: 13px; }
   @media (prefers-color-scheme: dark) { #demoFlag { color: #f0bd72; } }
   #link.demo { color: #b26b00; font-weight: 600; }
+  #autoBanner { margin: 0 0 12px; }
+  #noticeCard { margin: 0 0 12px; }
+  button.inline { width: auto; margin-top: 8px; padding: 7px 12px;
+    font-size: 13px; background: transparent; border: 1px solid currentColor;
+    color: inherit; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -106,12 +111,19 @@
     <div class="verdict" id="verdict" hidden></div>
   </section>
 
+  <div class="verdict yes" id="autoBanner" hidden></div>
+
   <section class="card" id="modelCard" hidden>
     <h2>On-device model</h2>
     <div id="modelText" class="note"></div>
     <div class="bar" id="barWrap" hidden><i id="bar"></i></div>
     <div style="margin-top:12px"><button id="prepare">Download model</button></div>
   </section>
+
+  <div class="verdict no" id="noticeCard" hidden>
+    <span id="noticeText"></span>
+    <button id="resetChat" class="inline">Reset chat</button>
+  </div>
 
   <div id="chat"></div>
 </main>
@@ -129,6 +141,9 @@
   var $ = function (id) { return document.getElementById(id); };
   var device = null;   // raw measurements from the app
   var verdict = null;  // what policy.js made of them
+  var statusSeen = false;  // a real status has arrived, not the placeholder
+  var asked = false;       // prepare was sent automatically; one-way on purpose
+  var failed = false;      // a download or load has errored at least once
   var status = { state: 'absent', progress: 0, name: 'the model', size: '' };
 
   // --- page -> app ------------------------------------------------------
@@ -153,7 +168,11 @@
         renderDevice();
         renderModel();
       }
-      else if (msg.type === 'status') { status = msg; renderModel(); }
+      else if (msg.type === 'status') {
+        status = msg;
+        statusSeen = true;
+        renderModel();
+      }
       else if (msg.type === 'transcript') { renderChat(msg); }
     }
   };
@@ -197,24 +216,46 @@
       return;
     }
 
+    var st = status.state;
     var name = status.name || 'the model';
     var pct = Math.round((status.progress || 0) * 100);
     var btn = $('prepare');
     var text = $('modelText');
-    $('barWrap').hidden = status.state !== 'downloading';
+    $('barWrap').hidden = st !== 'downloading';
     $('bar').style.width = pct + '%';
     btn.hidden = false;
     btn.disabled = false;
 
-    if (status.state === 'absent') {
+    // An eligible device does not wait to be asked. Guarded three ways: only
+    // once a real status has arrived (the placeholder says 'absent' before the
+    // app has spoken), only once ever, and never after an error — an auto-retry
+    // on a failing download is an infinite loop.
+    var outstanding = st === 'absent' || st === 'installed';
+    if (verdict.autoDownload && statusSeen && outstanding && !asked) {
+      asked = true;
+      toApp({ type: 'prepare' });
+    }
+    if (st === 'error') failed = true;
+    // Once anything has failed the retry is the user's, so stop claiming the
+    // download is happening automatically.
+    var running = asked && !failed && st !== 'ready';
+    $('autoBanner').hidden = !running;
+    $('autoBanner').textContent = st === 'downloading' || st === 'loading'
+      ? 'Device is eligible — downloading automatically, nothing to do.'
+      : 'Device is eligible — starting the download automatically…';
+
+    if (st === 'absent') {
       text.textContent = name + ' · ' + (status.size || '') + ' — not downloaded yet.';
       btn.textContent = 'Download model';
+      // Hidden while the automatic run has it in hand; it comes back on error.
+      btn.hidden = asked;
     } else if (status.state === 'downloading') {
       text.textContent = 'Downloading ' + name + ' — ' + pct + '%';
       btn.textContent = 'Downloading…'; btn.disabled = true;
     } else if (status.state === 'installed') {
       text.textContent = name + ' is downloaded.';
       btn.textContent = 'Start the model';
+      btn.hidden = asked;
     } else if (status.state === 'loading') {
       text.textContent = 'Starting ' + name + ' on this device…';
       btn.textContent = 'Starting…'; btn.disabled = true;
@@ -226,7 +267,14 @@
       btn.textContent = 'Try again';
     }
 
-    var ready = status.state === 'ready';
+
+    // A note about the last turn, not the model's state — the model is loaded
+    // and the composer stays open. Chat errors used to arrive as state:'error'
+    // and locked the input on a model that was still working.
+    $('noticeCard').hidden = !status.notice;
+    if (status.notice) $('noticeText').textContent = status.notice;
+
+    var ready = st === 'ready';
     setComposer(ready, ready ? 'Message the on-device model' : 'Model not ready yet');
   }
 
@@ -260,6 +308,10 @@
   // --- input ------------------------------------------------------------
 
   $('prepare').addEventListener('click', function () { toApp({ type: 'prepare' }); });
+  $('resetChat').addEventListener('click', function () {
+    $('noticeCard').hidden = true;
+    toApp({ type: 'reset' });
+  });
 
   function send() {
     var text = $('input').value.trim();
@@ -305,6 +357,7 @@
       'hosted page can be checked without a phone. Inside the app these come ' +
       'from the device itself and none of this code runs.';
     $('main').insertBefore(flag, $('main').firstChild);
+    fakeApp();
     var ram = Number((location.search.match(/ram=(\d+)/) || [])[1] || 6144);
     // Only measurements, exactly like the app sends. The verdict still comes
     // from policy.js, so demo mode exercises the real rule.
@@ -316,17 +369,33 @@
         lowRamDevice: false
       }
     }));
-    var p = 0;
-    $('prepare').addEventListener('click', function () {
-      var t = setInterval(function () {
-        p = Math.min(1, p + 0.07);
-        window.GemmaBridge.receive(JSON.stringify({
-          type: 'status', state: p < 1 ? 'downloading' : 'ready', progress: p,
-          name: 'FunctionGemma 270M', size: '289 MB'
-        }));
-        if (p >= 1) clearInterval(t);
-      }, 120);
-    });
+    // The app pushes a status on the handshake; demo mode has to as well, or
+    // the card shows its "the model" placeholder.
+    window.GemmaBridge.receive(JSON.stringify({
+      type: 'status', state: 'absent', progress: 0,
+      name: 'FunctionGemma 270M', size: '289 MB'
+    }));
+  }
+
+  // Stands in for the app so demo mode goes through the real path: the page
+  // auto-sends `prepare`, this answers with the same status pushes the app
+  // would. Installed before the device is sent, or the auto-start has nothing
+  // to talk to.
+  function fakeApp() {
+    window.GemmaHost = {
+      postMessage: function (raw) {
+        if (JSON.parse(raw).type !== 'prepare') return;
+        var p = 0;
+        var t = setInterval(function () {
+          p = Math.min(1, p + 0.07);
+          window.GemmaBridge.receive(JSON.stringify({
+            type: 'status', state: p < 1 ? 'downloading' : 'ready',
+            progress: p, name: 'FunctionGemma 270M', size: '289 MB'
+          }));
+          if (p >= 1) clearInterval(t);
+        }, 120);
+      }
+    };
   }
 })();
 </script>

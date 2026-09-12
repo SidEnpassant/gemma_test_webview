@@ -32,6 +32,7 @@
     if (!isFinite(ram) || ram <= 0) {
       return {
         capable: false,
+        autoDownload: false,
         reason: 'Cannot tell how much memory this device has, so the ' +
           'on-device model is not offered.'
       };
@@ -39,12 +40,20 @@
     if (ram < MIN_RAM_MB) {
       return {
         capable: false,
+        autoDownload: false,
         reason: 'Cannot run the model on this device — it reports ' +
           gb(ram) + ' GB of RAM, and about 4 GB is needed.'
       };
     }
     return {
       capable: true,
+      // Fetch it without waiting to be asked. Set false to put the button
+      // back — it is here rather than in index.html because "should this
+      // device pull 289 MB right now" is the same kind of call as "can it run
+      // the model", and the backend will want to make both. Worth revisiting
+      // if metered connections become a concern: nothing here can see whether
+      // the user is on Wi-Fi.
+      autoDownload: true,
       reason: 'Enough memory to run the on-device model.'
     };
   }

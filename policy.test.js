@@ -25,6 +25,16 @@ assert.ok(policy.decide({ ramMB: 2048 }).reason.includes('2.0 GB'));
 assert.ok(policy.decide({ ramMB: 0 }).reason.includes('Cannot tell'));
 assert.ok(policy.decide({ ramMB: 6144 }).reason.length > 0);
 
+// Auto-download follows eligibility and nothing else: a device that is not
+// offered the model must never be told to fetch 289 MB of it.
+assert.strictEqual(policy.decide({ ramMB: 6144 }).autoDownload, true);
+assert.strictEqual(policy.decide({ ramMB: 2048 }).autoDownload, false);
+assert.strictEqual(policy.decide({ ramMB: 0 }).autoDownload, false);
+for (const ram of [0, 2048, 3072, 3584, 6144]) {
+  const d = policy.decide({ ramMB: ram });
+  assert.strictEqual(d.autoDownload, d.capable, `autoDownload tracks capable at ${ram}`);
+}
+
 assert.strictEqual(policy.gb(7680), '7.5');
 
 console.log('policy.js: all assertions passed');
